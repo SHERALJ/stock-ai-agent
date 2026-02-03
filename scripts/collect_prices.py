@@ -24,6 +24,46 @@ def to_yahoo_ticker(row: pd.Series) -> str:
 
     return str(row["symbol"]).strip() + ".CM"
 
+def ticker_candidates(row: pd.Series) -> list[str]:
+    """
+    Return a list of possible Yahoo tickers to try, ordered from best guess to worst.
+    """
+    cands = []
+
+    # 1) If user provided yahoo_ticker in CSV, try it first
+    if "yahoo_ticker" in row and isinstance(row["yahoo_ticker"], str) and row["yahoo_ticker"].strip():
+        cands.append(row["yahoo_ticker"].strip())
+
+    # 2) From cse_symbol (JKH.N0000 -> JKH-N0000.CM)
+    cse_symbol = ""
+    if "cse_symbol" in row and isinstance(row["cse_symbol"], str) and row["cse_symbol"].strip():
+        cse_symbol = row["cse_symbol"].strip()
+        cands.append(cse_symbol.replace(".", "-") + ".CM")
+
+        # If it's a preference share like AAF.P0000, also try normal share AAF.N0000
+        parts = cse_symbol.split(".")
+        if len(parts) == 2:
+            base, series = parts[0], parts[1]
+            if series.upper().startswith("P"):
+                cands.append(f"{base}-N0000.CM")
+
+    # 3) Base symbol fallbacks
+    base_symbol = str(row["symbol"]).strip()
+    cands.append(f"{base_symbol}-N0000.CM")   # common pattern
+    cands.append(f"{base_symbol}.CM")         # sometimes used
+    cands.append(base_symbol)                 # last try
+
+    # Remove duplicates while keeping order
+    seen = set()
+    unique = []
+    for t in cands:
+        if t and t not in seen:
+            seen.add(t)
+            unique.append(t)
+
+    return unique
+
+
 def fetch_price(yahoo_ticker: str) -> float:
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=5d"
     r = requests.get(url, headers=HEADERS, timeout=15)
@@ -78,30 +118,40 @@ def main():
 
     for _, row in symbols_df.iterrows():
         symbol = str(row["symbol"]).strip()
-        yahoo_ticker = to_yahoo_ticker(row)
 
-        try:
-            price = fetch_price(yahoo_ticker)
+        cands = ticker_candidates(row)
 
-            rows.append({
+        success = False
+        last_error = ""
+
+        for yahoo_ticker in cands:
+            try:
+                price = fetch_price(yahoo_ticker)
+
+                rows.append({
+                    "date": today,
+                    "symbol": symbol,
+                    "yahoo_ticker": yahoo_ticker,
+                    "close_price": price
+                })
+
+                print(f"Collected {symbol} ({yahoo_ticker}): {price}")
+                success = True
+                break
+
+            except Exception as e:
+                last_error = str(e)
+
+        if not success:
+            print(f"Failed {symbol} (tried {len(cands)} tickers): {last_error}")
+
+            failed.append({
                 "date": today,
                 "symbol": symbol,
-                "yahoo_ticker": yahoo_ticker,
-                "close_price": price
+                "yahoo_ticker": cands[0] if cands else "",
+                "error": last_error[:250]
             })
 
-            print(f"Collected {symbol} ({yahoo_ticker}): {price}")
-
-        except Exception as e:
-         msg = str(e)
-         print(f"Failed {symbol} ({yahoo_ticker}): {msg}")
-
-         failed.append({
-        "date": today,
-        "symbol": symbol,
-        "yahoo_ticker": yahoo_ticker,
-        "error": msg[:250]
-          })
 
 
     df_new = pd.DataFrame(rows, columns=["date", "symbol", "yahoo_ticker", "close_price"])
