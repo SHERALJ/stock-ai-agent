@@ -5,6 +5,7 @@ from datetime import datetime
 
 SYMBOL_FILE = "config/cse_symbols.csv"
 OUTPUT_FILE = "data/raw/daily_prices.csv"
+FAILED_FILE = "data/raw/failed_prices.csv"
 
 os.makedirs("data/raw", exist_ok=True)
 
@@ -73,6 +74,7 @@ def main():
     today = datetime.now().strftime("%Y-%m-%d")
 
     rows = []
+    failed = []
 
     for _, row in symbols_df.iterrows():
         symbol = str(row["symbol"]).strip()
@@ -91,7 +93,16 @@ def main():
             print(f"Collected {symbol} ({yahoo_ticker}): {price}")
 
         except Exception as e:
-            print(f"Failed {symbol} ({yahoo_ticker}): {e}")
+         msg = str(e)
+         print(f"Failed {symbol} ({yahoo_ticker}): {msg}")
+
+         failed.append({
+        "date": today,
+        "symbol": symbol,
+        "yahoo_ticker": yahoo_ticker,
+        "error": msg[:250]
+          })
+
 
     df_new = pd.DataFrame(rows, columns=["date", "symbol", "yahoo_ticker", "close_price"])
     df_old = safe_read_existing(OUTPUT_FILE)
@@ -106,6 +117,11 @@ def main():
 
     df_all.to_csv(OUTPUT_FILE, index=False)
     print("Daily price collection completed.")
+
+    df_failed = pd.DataFrame(failed, columns=["date", "symbol", "yahoo_ticker", "error"])
+    df_failed.to_csv(FAILED_FILE, index=False)
+    print(f"Failed list saved to {FAILED_FILE} ({len(df_failed)} rows)")
+
 
 if __name__ == "__main__":
     main()
