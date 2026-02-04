@@ -9,15 +9,26 @@ import streamlit as st
 BASE_DIR = Path(__file__).resolve().parent
 
 INDICATORS_FILE = BASE_DIR / "data" / "processed" / "indicators.csv"
+INDICATORS_WEEKLY_FILE = BASE_DIR / "data" / "processed" / "indicators_weekly.csv"
 LATEST_FILE = BASE_DIR / "data" / "processed" / "latest_signals.csv"
 MASTER_FILE = BASE_DIR / "data" / "reference" / "company_master.csv"
+WATCHLIST_FILE = BASE_DIR / "data" / "processed" / "watchlist_top20.csv"
+COVERAGE_FILE = BASE_DIR / "data" / "processed" / "coverage_report.csv"
+
+st.subheader("Data Coverage & Health")
+if COVERAGE_FILE.exists():
+    cov = pd.read_csv(COVERAGE_FILE)
+    st.dataframe(cov, use_container_width=True, height=400)
+else:
+    st.info("Run: python scripts/build_coverage_report.py")
+
 
 st.set_page_config(page_title="CSE Compare Dashboard", layout="wide")
 
 
 @st.cache_data
-def load_data():
-    ind = pd.read_csv(INDICATORS_FILE)
+def load_data(indicators_path: Path):
+    ind = pd.read_csv(indicators_path)
     ind["date"] = pd.to_datetime(ind["date"])
 
     latest = pd.read_csv(LATEST_FILE)
@@ -47,7 +58,7 @@ def load_data():
     ind["label"] = ind["company_name"].fillna("Unknown") + " (" + ind["symbol"] + ")"
     latest["label"] = latest["company_name"].fillna("Unknown") + " (" + latest["symbol"] + ")"
 
-    return ind, latest, master_key
+    return ind, latest
 
 
 def normalize_price(g: pd.DataFrame, price_col="close") -> pd.Series:
@@ -129,6 +140,7 @@ def signals_table(latest: pd.DataFrame, selected_symbols: list[str]) -> pd.DataF
         "dist_to_52w_high",
         "drawdown",
         "vol_20",
+        "score",
     ]
     cols = [c for c in cols if c in view.columns]
     view = view[cols].copy()
@@ -144,9 +156,13 @@ def signals_table(latest: pd.DataFrame, selected_symbols: list[str]) -> pd.DataF
     if "close" in view.columns:
         view["close"] = view["close"].round(2)
 
-    sort_cols = [c for c in ["trend_long", "company_name"] if c in view.columns]
+    sort_cols = [c for c in ["score", "trend_long", "company_name"] if c in view.columns]
     if sort_cols:
-        view = view.sort_values(sort_cols, ascending=[False, True][: len(sort_cols)])
+        # score desc, trend_long desc, name asc (as available)
+        ascending = []
+        for c in sort_cols:
+            ascending.append(False if c in {"score", "trend_long"} else True)
+        view = view.sort_values(sort_cols, ascending=ascending)
 
     return view
 
@@ -154,33 +170,10 @@ def signals_table(latest: pd.DataFrame, selected_symbols: list[str]) -> pd.DataF
 def main():
     st.title("Sri Lanka (CSE) Stocks: Compare + Signals")
 
-    st.subheader("Debug")
-    st.write("BASE_DIR:", str(BASE_DIR))
-    st.write("Indicators file:", str(INDICATORS_FILE), "exists:", INDICATORS_FILE.exists())
-    st.write("Latest file:", str(LATEST_FILE), "exists:", LATEST_FILE.exists())
-    st.write("Master file:", str(MASTER_FILE), "exists:", MASTER_FILE.exists())
-
-    for path in [INDICATORS_FILE, LATEST_FILE, MASTER_FILE]:
-        if not path.exists():
-            st.error(f"Missing file: {path}")
-            st.stop()
-
-    ind, latest, _master_key = load_data()
-
-    # Build dropdown options from symbols that actually exist in indicators
-    available = ind[["symbol", "label"]].drop_duplicates().sort_values("label")
-    options = available["label"].tolist()
-    label_to_symbol = dict(zip(available["label"], available["symbol"]))
-
-    if not options:
-        st.error("No symbols available in indicators.csv. Run scripts/build_indicators.py")
-        st.stop()
-
+    # Sidebar controls MUST come before timeframe is used
     st.sidebar.header("Controls")
 
-    default_pick = options[:5] if len(options) >= 5 else options
-    picked_labels = st.sidebar.multiselect("Select companies", options=options, default=default_pick)
-    picked_symbols = [label_to_symbol[lbl] for lbl in picked_labels]
+    timeframe = st.sidebar.radio("Timeframe", ["Daily", "Weekly"], index=0)
 
     view = st.sidebar.selectbox(
         "Chart view",
@@ -197,6 +190,50 @@ def main():
 
     show_ma = st.sidebar.checkbox("Show SMA50 & SMA200 (Close Price view only)", value=False)
 
+    # Debug
+    st.subheader("Debug")
+    st.write("BASE_DIR:", str(BASE_DIR))
+    st.write("Daily indicators file:", str(INDICATORS_FILE), "exists:", INDICATORS_FILE.exists())
+    st.write("Weekly indicators file:", str(INDICATORS_WEEKLY_FILE), "exists:", INDICATORS_WEEKLY_FILE.exists())
+    st.write("Latest file:", str(LATEST_FILE), "exists:", LATEST_FILE.exists())
+    st.write("Master file:", str(MASTER_FILE), "exists:", MASTER_FILE.exists())
+    st.write("Watchlist file:", str(WATCHLIST_FILE), "exists:", WATCHLIST_FILE.exists())
+
+    # Guardrails
+    for path in [LATEST_FILE, MASTER_FILE]:
+        if not path.exists():
+            st.error(f"Missing file: {path}")
+            st.stop()
+
+    ind_path = INDICATORS_FILE if timeframe == "Daily" else INDICATORS_WEEKLY_FILE
+    if not ind_path.exists():
+        st.error(f"Missing file: {ind_path}. Run scripts/build_indicators.py")
+        st.stop()
+
+    ind, latest = load_data(ind_path)
+
+    # Watchlist table (optional)
+    st.subheader("Top 20 Watchlist (score)")
+    if WATCHLIST_FILE.exists():
+        wl = pd.read_csv(WATCHLIST_FILE)
+        st.dataframe(wl, use_container_width=True, height=420)
+    else:
+        st.info("Watchlist not found. Run: python scripts/build_watchlist.py")
+
+    # Build dropdown options from symbols that actually exist in indicators
+    available = ind[["symbol", "label"]].drop_duplicates().sort_values("label")
+    options = available["label"].tolist()
+    label_to_symbol = dict(zip(available["label"], available["symbol"]))
+
+    if not options:
+        st.error("No symbols available in indicators file. Run scripts/build_indicators.py")
+        st.stop()
+
+    default_pick = options[:5] if len(options) >= 5 else options
+    picked_labels = st.sidebar.multiselect("Select companies", options=options, default=default_pick)
+    picked_symbols = [label_to_symbol[lbl] for lbl in picked_labels]
+
+    # Date range
     min_date = ind["date"].min()
     max_date = ind["date"].max()
     start, end = st.sidebar.date_input(
@@ -206,6 +243,7 @@ def main():
         max_value=max_date.date(),
     )
 
+    # Filter data
     dff = ind[ind["symbol"].isin(picked_symbols)].copy()
     dff = dff[(dff["date"] >= pd.to_datetime(start)) & (dff["date"] <= pd.to_datetime(end))]
 
@@ -213,6 +251,7 @@ def main():
         st.warning("No data for selected companies in the selected date range.")
         st.stop()
 
+    # Main layout
     left, right = st.columns([2, 1], gap="large")
 
     with left:
@@ -227,6 +266,7 @@ def main():
 
     st.divider()
 
+    # Single company detail view
     st.subheader("Open a single company detail view")
     one_label = st.selectbox("Choose one company", options=options, index=0)
     one_symbol = label_to_symbol[one_label]
